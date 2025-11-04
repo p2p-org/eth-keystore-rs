@@ -11,10 +11,10 @@ pub mod geth_compat {
     where
         S: AsRef<[u8]>,
     {
-        let secret_key = SigningKey::from_bytes(pk.as_ref())?;
-        let public_key = PublicKey::from(&secret_key.verifying_key());
+        let secret_key = SigningKey::from_slice(pk.as_ref())?;
+        let public_key = PublicKey::from(secret_key.verifying_key());
         let public_key = public_key.to_encoded_point(/* compress = */ false);
-        let public_key = public_key.as_bytes();
+        let public_key = public_key.to_bytes();
         debug_assert_eq!(public_key[0], 0x04);
         let hash = keccak256(&public_key[1..]);
         Ok(Address::from_slice(&hash[12..]))
@@ -29,4 +29,14 @@ pub mod geth_compat {
         hasher.update(bytes.as_ref());
         hasher.finalize().into()
     }
+}
+
+#[cfg(feature = "v4")]
+pub fn pubkey_from_pk<S>(pk: S) -> Result<Vec<u8>, crate::KeystoreError>
+where
+    S: AsRef<[u8]>,
+{
+    let secret_key = blst::min_pk::SecretKey::from_bytes(pk.as_ref())?;
+    let public_key = secret_key.sk_to_pk().compress();
+    Ok(public_key.to_vec())
 }

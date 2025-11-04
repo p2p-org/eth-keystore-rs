@@ -1,0 +1,30 @@
+{
+  "version": 4,
+  "id": "23fb6c51-79c8-4ce5-a02a-0f4f169a4168",
+  "pubkey": "",
+  "crypto": {
+    "cipher": {
+      "function": "aes-128-ctr",
+      "message": "eb7302cc8669683e49fc40f3445464020568a1d82e71c977264f286a3099be58",
+      "params": {
+        "iv": "2a9fc5d709ab79e7f015111b93872f6c"
+      }
+    },
+    "kdf": {
+      "function": "scrypt",
+      "message": "",
+      "params": {
+        "dklen": 32,
+        "salt": "19a1b0af7a3f4f04a4e8d1cf722550e905da18b369029b0460b12765f19d8a99",
+        "n": 8192,
+        "r": 8,
+        "p": 1
+      }
+    },
+    "checksum": {
+      "function": "sha256",
+      "message": "848c0ea5e3e0f3ce3068f9e7a4c29c13566d164f8b736158f90f7255a8e51c41",
+      "params": {}
+    }
+  }
+}

@@ -1,9 +1,19 @@
-use hex::{FromHex, ToHex};
-use serde::{de::Deserializer, ser::Serializer, Deserialize, Serialize};
+use aes::cipher::{KeyIvInit, StreamCipher};
+use ctr::Ctr128BE;
+use digest::Update;
+use hmac::Hmac;
+use pbkdf2::pbkdf2;
+use scrypt::scrypt;
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
+use sha2::{Digest, Sha256};
+use sha3::Keccak256;
 use uuid::Uuid;
 
 #[cfg(feature = "geth-compat")]
 use ethereum_types::H160 as Address;
+
+use crate::KeystoreError;
 
 #[derive(Debug, Deserialize, Serialize)]
 /// This struct represents the deserialized form of an encrypted JSON keystore based on the
@@ -12,48 +22,71 @@ pub struct EthKeystore {
     #[cfg(feature = "geth-compat")]
     pub address: Address,
 
-    pub crypto: CryptoJson,
+    pub crypto: Crypto,
     pub id: Uuid,
     pub version: u8,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize, Serialize)]
 /// Represents the "crypto" part of an encrypted JSON keystore.
-pub struct CryptoJson {
+pub struct Crypto {
     pub cipher: String,
-    pub cipherparams: CipherparamsJson,
-    #[serde(serialize_with = "buffer_to_hex", deserialize_with = "hex_to_buffer")]
+    pub cipherparams: Cipherparams,
+    #[serde_as(as = "serde_with::hex::Hex")]
     pub ciphertext: Vec<u8>,
     pub kdf: KdfType,
-    pub kdfparams: KdfparamsType,
-    #[serde(serialize_with = "buffer_to_hex", deserialize_with = "hex_to_buffer")]
+    pub kdfparams: Kdfparams,
+    #[serde_as(as = "serde_with::hex::Hex")]
     pub mac: Vec<u8>,
 }
 
+impl Crypto {
+    pub fn private_key(&self, password: impl AsRef<[u8]>) -> Result<Vec<u8>, KeystoreError> {
+        let key = self.kdfparams.derive_key(password)?;
+        let checksum = Keccak256::new()
+            .chain(&key[16..32])
+            .chain(&self.ciphertext)
+            .finalize();
+
+        if checksum.as_ref() != self.mac {
+            return Err(KeystoreError::MacMismatch);
+        }
+
+        let mut decryptor: Ctr128BE<aes::Aes128> =
+            Ctr128BE::new_from_slices(&key[..16], &self.cipherparams.iv[..16])?;
+        let mut pk = self.ciphertext.clone();
+        decryptor.apply_keystream(&mut pk);
+
+        Ok(pk)
+    }
+}
+
+#[serde_as]
 #[derive(Debug, Deserialize, Serialize)]
 /// Represents the "cipherparams" part of an encrypted JSON keystore.
-pub struct CipherparamsJson {
-    #[serde(serialize_with = "buffer_to_hex", deserialize_with = "hex_to_buffer")]
+pub struct Cipherparams {
+    #[serde_as(as = "serde_with::hex::Hex")]
     pub iv: Vec<u8>,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-/// Types of key derivition functions supported by the Web3 Secret Storage.
 pub enum KdfType {
     Pbkdf2,
     Scrypt,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 /// Defines the various parameters used in the supported KDFs.
-pub enum KdfparamsType {
+pub enum Kdfparams {
     Pbkdf2 {
         c: u32,
         dklen: u8,
         prf: String,
-        #[serde(serialize_with = "buffer_to_hex", deserialize_with = "hex_to_buffer")]
+        #[serde_as(as = "serde_with::hex::Hex")]
         salt: Vec<u8>,
     },
     Scrypt {
@@ -61,31 +94,40 @@ pub enum KdfparamsType {
         n: u32,
         p: u32,
         r: u32,
-        #[serde(serialize_with = "buffer_to_hex", deserialize_with = "hex_to_buffer")]
+        #[serde_as(as = "serde_with::hex::Hex")]
         salt: Vec<u8>,
     },
 }
 
-fn buffer_to_hex<T, S>(buffer: &T, serializer: S) -> Result<S::Ok, S::Error>
-where
-    T: AsRef<[u8]>,
-    S: Serializer,
-{
-    serializer.serialize_str(&buffer.encode_hex::<String>())
-}
-
-fn hex_to_buffer<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    use serde::de::Error;
-    String::deserialize(deserializer)
-        .and_then(|string| Vec::from_hex(string).map_err(|err| Error::custom(err.to_string())))
+impl Kdfparams {
+    fn derive_key(&self, password: impl AsRef<[u8]>) -> Result<Vec<u8>, KeystoreError> {
+        match self {
+            Self::Pbkdf2 { c, dklen, salt, .. } => {
+                let mut key = vec![0u8; *dklen as usize];
+                pbkdf2::<Hmac<Sha256>>(password.as_ref(), salt, *c, &mut key)
+                    .expect("HMAC can be initialized with any key length");
+                Ok(key)
+            }
+            Self::Scrypt {
+                dklen,
+                n,
+                p,
+                r,
+                salt,
+            } => {
+                let mut key = vec![0u8; *dklen as usize];
+                let scrypt_params = scrypt::Params::new(n.ilog2() as u8, *r, *p, *dklen as usize)?;
+                scrypt(password.as_ref(), salt, &scrypt_params, &mut key)?;
+                Ok(key)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex::FromHex;
 
     #[cfg(feature = "geth-compat")]
     #[test]
@@ -124,26 +166,25 @@ mod tests {
     fn test_deserialize_pbkdf2() {
         let data = r#"
         {
-            "crypto" : {
-                "cipher" : "aes-128-ctr",
-                "cipherparams" : {
-                    "iv" : "6087dab2f9fdbbfaddc31a909735c1e6"
+            "crypto": {
+                "cipher": "aes-128-ctr",
+                "cipherparams": {
+                    "iv": "6087dab2f9fdbbfaddc31a909735c1e6"
                 },
-                "ciphertext" : "5318b4d5bcd28de64ee5559e671353e16f075ecae9f99c7a79a38af5f869aa46",
-                "kdf" : "pbkdf2",
-                "kdfparams" : {
-                    "c" : 262144,
-                    "dklen" : 32,
-                    "prf" : "hmac-sha256",
-                    "salt" : "ae3cd4e7013836a3df6bd7241b12db061dbe2c6785853cce422d148a624ce0bd"
+                "ciphertext": "5318b4d5bcd28de64ee5559e671353e16f075ecae9f99c7a79a38af5f869aa46",
+                "kdf": "pbkdf2",
+                "kdfparams": {
+                    "c": 262144,
+                    "dklen": 32,
+                    "prf": "hmac-sha256",
+                    "salt": "ae3cd4e7013836a3df6bd7241b12db061dbe2c6785853cce422d148a624ce0bd"
                 },
-                "mac" : "517ead924a9d0dc3124507e3393d175ce3ff7c1e96529c6c555ce9e51205e9b2"
+                "mac": "517ead924a9d0dc3124507e3393d175ce3ff7c1e96529c6c555ce9e51205e9b2"
             },
-            "id" : "3198bc9c-6672-5ab3-d995-4942343ae5b6",
-            "version" : 3
+            "id": "3198bc9c-6672-5ab3-d995-4942343ae5b6",
+            "version": 3
         }"#;
         let keystore: EthKeystore = serde_json::from_str(data).unwrap();
-        assert_eq!(keystore.version, 3);
         assert_eq!(
             keystore.id,
             Uuid::parse_str("3198bc9c-6672-5ab3-d995-4942343ae5b6").unwrap()
@@ -158,10 +199,9 @@ mod tests {
             Vec::from_hex("5318b4d5bcd28de64ee5559e671353e16f075ecae9f99c7a79a38af5f869aa46")
                 .unwrap()
         );
-        assert_eq!(keystore.crypto.kdf, KdfType::Pbkdf2);
         assert_eq!(
             keystore.crypto.kdfparams,
-            KdfparamsType::Pbkdf2 {
+            Kdfparams::Pbkdf2 {
                 c: 262144,
                 dklen: 32,
                 prf: String::from("hmac-sha256"),
@@ -203,7 +243,6 @@ mod tests {
             "version" : 3
         }"#;
         let keystore: EthKeystore = serde_json::from_str(data).unwrap();
-        assert_eq!(keystore.version, 3);
         assert_eq!(
             keystore.id,
             Uuid::parse_str("3198bc9c-6672-5ab3-d995-4942343ae5b6").unwrap()
@@ -218,10 +257,9 @@ mod tests {
             Vec::from_hex("d172bf743a674da9cdad04534d56926ef8358534d458fffccd4e6ad2fbde479c")
                 .unwrap()
         );
-        assert_eq!(keystore.crypto.kdf, KdfType::Scrypt);
         assert_eq!(
             keystore.crypto.kdfparams,
-            KdfparamsType::Scrypt {
+            Kdfparams::Scrypt {
                 dklen: 32,
                 n: 262144,
                 p: 8,

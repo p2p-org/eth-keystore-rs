@@ -1,10 +1,11 @@
-name: Rust
+name: Integration
 
 on:
-  push:
-    branches: [ master ]
+  workflow_dispatch:
   pull_request:
-    branches: [ master ]
+    types: [opened, synchronize]
+  push:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,11 +17,11 @@ jobs:
       - uses: actions/checkout@v2
       - name: Build
         run: cargo build
-      - name: Formatting
-        run: cargo fmt --all -- --check
-      - name: Linting
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint
         run: cargo clippy -- -D warnings
-      - name: Tests
+      - name: Test
         run: cargo test
 
   features:
@@ -28,6 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Build
-        run: cargo build --all-features
-      - name: Tests
-        run: cargo test --all-features
+        run: cargo build -F v4,geth-compat
+      - name: Lint
+        run: cargo clippy -F v4,geth-compat -- -D warnings
+      - name: Test
+        run: cargo test -F v4,geth-compat

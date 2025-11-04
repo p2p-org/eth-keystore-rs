@@ -27,6 +27,10 @@ pub enum KeystoreError {
     #[cfg(feature = "geth-compat")]
     #[error(transparent)]
     K256Error(#[from] k256::ecdsa::Error),
+
+    #[cfg(feature = "v4")]
+    #[error("bls {0:?}")]
+    BlsError(blst::BLST_ERROR),
 }
 
 impl From<scrypt::errors::InvalidParams> for KeystoreError {
@@ -56,5 +60,12 @@ impl From<std::io::Error> for KeystoreError {
 impl From<serde_json::Error> for KeystoreError {
     fn from(e: serde_json::Error) -> KeystoreError {
         KeystoreError::SerdeJson(e.to_string())
+    }
+}
+
+#[cfg(feature = "v4")]
+impl From<blst::BLST_ERROR> for KeystoreError {
+    fn from(e: blst::BLST_ERROR) -> Self {
+        KeystoreError::BlsError(e)
     }
 }
